@@ -1,10 +1,3 @@
-//! This example shows how to read from and write to PIO using DMA.
-//!
-//! If a LED is connected to that pin, like on a Pico board, it will continously output "HELLO
-//! WORLD" in morse code. The example also tries to read the data back. If reading the data fails,
-//! the message will only be shown once, and then the LED remains dark.
-//!
-//! See the `Cargo.toml` file for Copyright and licence details.
 #![no_std]
 #![no_main]
 
@@ -17,6 +10,7 @@ use hal::pio::PIOExt;
 use hal::sio::Sio;
 use panic_halt as _;
 use rp2040_hal as hal;
+use rp2040_hal::pio::PIOBuilder;
 
 #[link_section = ".boot2"]
 #[used]
@@ -34,10 +28,22 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // configure LED pin for Pio0.
-    let _led: Pin<_, FunctionPio0> = pins.gpio22.into_mode();
-    // PIN id for use inside of PIO
+    // configure out pin for Pio0.
+    let _: Pin<_, FunctionPio0> = pins.gpio22.into_mode();
     let out_pin_id = 22;
+
+    let _: Pin<_, FunctionPio0> = pins.gpio21.into_mode();
+    let modulator_in_pin_id = 21;
+    let _: Pin<_, FunctionPio0> = pins.gpio20.into_mode();
+    let modulator_out_pin_id = 20;
+
+    let modulate = pio_proc::pio_asm!(
+        ".wrap_target",
+        "    mov pins, x",
+        "    in pins, 1",
+        "    mov x, isr",
+        ".wrap"
+    );
 
     // PDM sine wave
     #[allow(clippy::unusual_byte_groupings)]
@@ -48,42 +54,59 @@ fn main() -> ! {
         0b_00000001_00000000_00100010_01001010
     ];
 
-    // Define a PIO program which reads data from the TX FIFO bit by bit, configures the LED
-    // according to the data, and then writes the data back to the RX FIFO.
-    let program = pio_proc::pio_asm!(
+    let read_buf = pio_proc::pio_asm!(
         ".wrap_target",
-        "    out pins, 1 [9]",
+        "    out pins, 1 [1]",
         ".wrap"
     );
 
     // Initialize and start PIO
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let installed = pio.install(&program.program).unwrap();
-    let (mut sm, _, tx) = rp2040_hal::pio::PIOBuilder::from_program(installed)
+    let (mut pio, sm0, sm1, _, _) = pac.PIO0.split(&mut pac.RESETS);
+
+    let read_buf_installed = pio.install(&read_buf.program).unwrap();
+    let (mut read_buf_sm, _, tx) = PIOBuilder::from_program(read_buf_installed)
         .out_pins(out_pin_id, 1)
         .clock_divisor_fixed_point(10_000, 0)
         .autopull(true)
         .build(sm0);
+
     // The GPIO pin needs to be configured as an output.
-    sm.set_pindirs([(out_pin_id, hal::pio::PinDir::Output)]);
-    sm.start();
+    read_buf_sm.set_pindirs([(out_pin_id, hal::pio::PinDir::Output)]);
+    read_buf_sm.start();
+
+    let modulate_installed = pio.install(&modulate.program).unwrap();
+    let (mut modulate_sm, rx, _) = PIOBuilder::from_program(modulate_installed)
+        .out_pins(modulator_out_pin_id, 1)
+        .in_pin_base(modulator_in_pin_id)
+        .clock_divisor_fixed_point(10_000, 0)
+        .autopush(true)
+        .build(sm1);
+    modulate_sm.set_pindirs([
+        (modulator_out_pin_id, hal::pio::PinDir::Output),
+        (modulator_in_pin_id, hal::pio::PinDir::Input)
+    ]);
 
     let dma = pac.DMA.split(&mut pac.RESETS);
 
-    // Transfer a single message via DMA.
-    let tx_buf = singleton!(: [u32; 4] = message).unwrap();
+    let buf1 = singleton!(: [u32; 4] = message).unwrap();
+    let buf2 = singleton!(: [u32; 4] = [0; 4]).unwrap();
 
-    // Chain some buffers together for continuous transfers
-    let tx_buf2 = singleton!(: [u32; 4] = message).unwrap();
+    let tx_transfer = DoubleBufferingConfig::new((dma.ch0, dma.ch1), buf1, tx).start();
+    let mut tx_transfer = tx_transfer.read_next(buf2);
 
-    let tx_transfer = DoubleBufferingConfig::new((dma.ch0, dma.ch1), tx_buf, tx).start();
-    let mut tx_transfer = tx_transfer.read_next(tx_buf2);
+    let rx_transfer = DoubleBufferingConfig::new((dma.ch2, dma.ch3), rx, buf2).start();
+    let mut rx_transfer = rx_transfer.write_next(buf1);
 
     loop {
         // When a transfer is done we immediately enqueue the buffers again.
         if tx_transfer.is_done() {
             let (tx_buf, next_tx_transfer) = tx_transfer.wait();
             tx_transfer = next_tx_transfer.read_next(tx_buf);
+        }
+
+        if rx_transfer.is_done() {
+            let (rx_buf, next_rx_transfer) = rx_transfer.wait();
+            rx_transfer = next_rx_transfer.write_next(rx_buf);
         }
     }
 }
