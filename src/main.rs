@@ -3,7 +3,7 @@
 
 use cortex_m::singleton;
 use cortex_m_rt::entry;
-use hal::dma::{DMAExt, DoubleBufferingConfig};
+use hal::dma::{DMAExt, double_buffer};
 use hal::gpio::{FunctionPio0, Pin};
 use hal::pac;
 use hal::pio::PIOExt;
@@ -91,10 +91,10 @@ fn main() -> ! {
     let buf1 = singleton!(: [u32; 4] = message).unwrap();
     let buf2 = singleton!(: [u32; 4] = [0; 4]).unwrap();
 
-    let tx_transfer = DoubleBufferingConfig::new((dma.ch0, dma.ch1), buf1, tx).start();
+    let tx_transfer = double_buffer::Config::new((dma.ch0, dma.ch1), buf1, tx).start();
     let mut tx_transfer = tx_transfer.read_next(buf2);
 
-    let rx_transfer = DoubleBufferingConfig::new((dma.ch2, dma.ch3), rx, buf2).start();
+    let rx_transfer = double_buffer::Config::new((dma.ch2, dma.ch3), rx, buf2).start();
     let mut rx_transfer = rx_transfer.write_next(buf1);
 
     loop {
